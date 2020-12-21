@@ -1,0 +1,114 @@
+diff --git a/arch/x86/entry/syscalls/syscall_32.tbl b/arch/x86/entry/syscalls/syscall_32.tbl
+index d8f8a1a69ed1..b03052c069e6 100644
+--- a/arch/x86/entry/syscalls/syscall_32.tbl
++++ b/arch/x86/entry/syscalls/syscall_32.tbl
+@@ -443,3 +443,4 @@
+ 437	i386	openat2			sys_openat2
+ 438	i386	pidfd_getfd		sys_pidfd_getfd
+ 439	i386	faccessat2		sys_faccessat2
++440	i386	store_hash		sys_store_hash
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index 78847b32e137..a2d35be2fee4 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -360,6 +360,7 @@
+ 437	common	openat2			sys_openat2
+ 438	common	pidfd_getfd		sys_pidfd_getfd
+ 439	common	faccessat2		sys_faccessat2
++440	common	store_hash		sys_store_hash
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff --git a/include/uapi/asm-generic/unistd.h b/include/uapi/asm-generic/unistd.h
+index f4a01305d9a6..241d26be25df 100644
+--- a/include/uapi/asm-generic/unistd.h
++++ b/include/uapi/asm-generic/unistd.h
+@@ -857,9 +857,11 @@ __SYSCALL(__NR_openat2, sys_openat2)
+ __SYSCALL(__NR_pidfd_getfd, sys_pidfd_getfd)
+ #define __NR_faccessat2 439
+ __SYSCALL(__NR_faccessat2, sys_faccessat2)
++#define __NR_store_hash 440
++__SYSCALL(__NR_store_hash, sys_store_hash)
+ 
+ #undef __NR_syscalls
+-#define __NR_syscalls 440
++#define __NR_syscalls 441
+ 
+ /*
+  * 32 bit systems traditionally used different
+diff --git a/net/socket.c b/net/socket.c
+index 976426d03f09..e72bff00c718 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -110,6 +110,10 @@ unsigned int sysctl_net_busy_read __read_mostly;
+ unsigned int sysctl_net_busy_poll __read_mostly;
+ #endif
+ 
++DEFINE_XARRAY(myxarray);
++static unsigned long xarray_count=0;
++#define DSM_HASH_SIZE 32
++
+ static ssize_t sock_read_iter(struct kiocb *iocb, struct iov_iter *to);
+ static ssize_t sock_write_iter(struct kiocb *iocb, struct iov_iter *from);
+ static int sock_mmap(struct file *file, struct vm_area_struct *vma);
+@@ -1525,6 +1529,60 @@ int __sys_socket(int family, int type, int protocol)
+ 	return sock_map_fd(sock, flags & (O_CLOEXEC | O_NONBLOCK));
+ }
+ 
++SYSCALL_DEFINE3(store_hash, int, option, unsigned long, new_page, __user unsigned char*, new_hash){
++	int i,err;
++	if(xarray_count < new_page){
++		//create pages
++		printk(KERN_INFO "Creating %lu pages\n",new_page);
++		for (i=xarray_count;i<new_page;i++){
++			char *temp_hash;
++			temp_hash = kmalloc((DSM_HASH_SIZE+1)*sizeof(char),GFP_KERNEL);
++			if(temp_hash == NULL){
++				return -ENOMEM;
++			}
++			strcpy(temp_hash,"0");
++			err = xa_err(xa_store(&myxarray,xarray_count,temp_hash,GFP_KERNEL));
++			if (!err){
++				xarray_count++;
++			}
++		}
++	}
++	if (option == 1){
++		//read page
++		char *hash;
++		printk(KERN_INFO "Reading %lu page -",new_page);
++		hash = xa_load(&myxarray,new_page);
++		printk(KERN_INFO "Value - %0.32s\n",hash);
++		if(copy_to_user(new_hash,hash,DSM_HASH_SIZE+1)!=0)
++			return -EFAULT;
++	}else if (option == 2){
++		//write page hash
++		char *temp_hash;
++		printk(KERN_INFO "Writing to %lu page with - ",new_page);
++		temp_hash = kmalloc((DSM_HASH_SIZE+1)*sizeof(char),GFP_KERNEL);
++		if(temp_hash == NULL){
++			return -ENOMEM;
++		}
++		if(copy_from_user(temp_hash,new_hash,DSM_HASH_SIZE) != 0)
++			return -EFAULT;
++		printk(KERN_INFO "%0.32s\n",new_hash);
++		err = xa_err(xa_store(&myxarray,new_page,temp_hash,GFP_KERNEL));
++		if (err){
++			return -EFAULT;
++		}
++	}else if (option == 3){
++		//free pages
++		char *temp_hash;
++		printk(KERN_INFO "Freeing page entries/n");
++		//xa_for_each(&myxarray,xarray_count,temp_hash){
++		//kfree(temp_hash);
++		//}
++		xa_destroy(&myxarray);
++		xarray_count = 0;
++	}
++	return 0;
++}
++
+ SYSCALL_DEFINE3(socket, int, family, int, type, int, protocol)
+ {
+ 	return __sys_socket(family, type, protocol);
